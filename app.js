@@ -389,6 +389,26 @@ function foodRow(f, extra = '') {
 }
 
 let searchCache = new Map();
+// Eingebaute Liste aus foods-de.js, sofort durchsuchbar, auch ohne Internet
+const norm = t => String(t || '').toLowerCase().replace(/ß/g, 'ss').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const GEN = (typeof GRAMM_FOODS !== 'undefined' ? GRAMM_FOODS : []).map((r, i) => ({
+  id: 'gen_' + i, name: r[0], brand: '', barcode: '', source: 'gen', servingG: r[8] || 0,
+  per100: { kcal: r[1], p: r[2], f: r[3], c: r[4], fib: r[5], sug: r[6], salt: r[7] },
+  _hay: norm(r[0] + ' ' + (r[9] || '')), _name: norm(r[0]),
+}));
+GEN.forEach(f => searchCache.set(f.id, f));
+function genSearch(term) {
+  const toks = norm(term).split(/\s+/).filter(Boolean);
+  if (!toks.length) return [];
+  return GEN.map(f => {
+    if (!toks.every(t => f._hay.includes(t))) return null;
+    let score = 0;
+    if (f._name.startsWith(toks[0])) score += 3;
+    if (f._name.split(/[ ,]+/).some(w => w.startsWith(toks[0]))) score += 2;
+    score -= f._name.length / 100;
+    return { f, score };
+  }).filter(Boolean).sort((a, b) => b.score - a.score).map(x => x.f).slice(0, 12);
+}
 async function renderSearchPane(pane) {
   const foods = await dbAll('foods');
   const recent = foods.filter(f => f.lastUsed).sort((a, b) => b.lastUsed - a.lastUsed).slice(0, 12);
@@ -410,9 +430,10 @@ async function renderSearchPane(pane) {
     const term = q.value.trim();
     const res = $('#results', pane);
     if (term.length < 2) { renderSearchPane(pane).then(() => { const nq = $('#q', pane); nq.value = term; nq.focus(); }); return; }
-    const lt = term.toLowerCase();
-    const mine = foods.filter(f => (f.name + ' ' + (f.brand || '')).toLowerCase().includes(lt)).slice(0, 15);
-    res.innerHTML = `${mine.length ? `<div class="sectionlbl">Meine Lebensmittel</div><div class="list">${mine.map(f => foodRow(f)).join('')}</div>` : ''}<div class="sectionlbl">Datenbank</div><div id="offres"><span class="spinner"></span></div>`;
+    const lt = norm(term);
+    const mine = foods.filter(f => norm(f.name + ' ' + (f.brand || '')).includes(lt)).slice(0, 15);
+    const gen = genSearch(term);
+    res.innerHTML = `${mine.length ? `<div class="sectionlbl">Meine Lebensmittel</div><div class="list">${mine.map(f => foodRow(f)).join('')}</div>` : ''}${gen.length ? `<div class="sectionlbl">Lebensmittel</div><div class="list">${gen.map(f => foodRow(f)).join('')}</div>` : ''}<div class="sectionlbl">Markenprodukte</div><div id="offres"><span class="spinner"></span></div>`;
     bindRows(res);
     timer = setTimeout(async () => {
       const my = ++seq;
@@ -423,11 +444,11 @@ async function renderSearchPane(pane) {
         const known = new Set(mine.map(f => f.barcode).filter(Boolean));
         const list = found.filter(f => !known.has(f.barcode));
         list.forEach(f => searchCache.set(f.id, f));
-        box.innerHTML = list.length ? `<div class="list">${list.map(f => foodRow(f)).join('')}</div>` : '<div class="empty">Nichts gefunden. Versuch einen anderen Begriff oder trag es selbst ein.</div>';
+        box.innerHTML = list.length ? `<div class="list">${list.map(f => foodRow(f)).join('')}</div>` : '<div class="empty">Keine Markenprodukte gefunden. Für Markenprodukte ist der Barcode am besten.</div>';
         bindRows(box);
       } catch (err) {
         const box = $('#offres', pane);
-        if (box) box.innerHTML = `<div class="empty">Die Datenbank ist gerade nicht erreichbar. Prüf deine Internetverbindung.</div>`;
+        if (box) box.innerHTML = `<div class="empty">Die Markensuche ist gerade nicht erreichbar. Für Markenprodukte nimm den Barcode.</div>`;
       }
     }, 450);
   };
@@ -464,7 +485,7 @@ async function openAmountSheet(food) {
     ${food.brand ? `<div class="muted small" style="margin-top:-6px">${esc(food.brand)}</div>` : ''}
     <div class="muted small">Pro 100 g: ${fmt(food.per100.kcal)} kcal · E ${fmt1(food.per100.p)} · F ${fmt1(food.per100.f)} · KH ${fmt1(food.per100.c)}</div>
     <label class="f">Menge in Gramm<input type="number" inputmode="decimal" id="ag" value="${startG}"></label>
-    <div class="quick">${[50, 100, 150, 200, 250].map(g => `<button data-g="${g}">${g} g</button>`).join('')}${serving ? `<button data-g="${serving}">1 Portion (${fmt(serving)} g)</button>` : ''}</div>
+    <div class="quick">${[50, 100, 150, 200, 250].map(g => `<button data-g="${g}">${g} g</button>`).join('')}${serving ? `<button data-g="${serving}">1 ${food.source === 'gen' ? 'Stück' : 'Portion'} (${fmt(serving)} g)</button><button data-g="${serving * 2}">2 Stück (${fmt(serving * 2)} g)</button>` : ''}</div>
     <div id="aprev"></div>
     <label class="f">Mahlzeit<select id="am">${MEALS.map(m => `<option value="${m.id}" ${m.id === addMeal ? 'selected' : ''}>${m.name}</option>`).join('')}</select></label>
     <div class="btns"><button class="btn" id="afav">${food.fav ? '★ Favorit' : '☆ Als Favorit'}</button><button class="btn primary" id="aadd">Eintragen</button></div>`);
@@ -590,6 +611,15 @@ function offToFood(p) {
 }
 const OFF_FIELDS = 'code,product_name,product_name_de,generic_name,brands,nutriments,serving_quantity';
 async function offSearch(term) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), 6000);
+  try {
+    const r = await fetch(`https://search.openfoodfacts.org/search?q=${encodeURIComponent(term)}&langs=de&page_size=20&fields=${OFF_FIELDS}`, { signal: ctrl.signal });
+    if (r.ok) { const j = await r.json(); const list = (j.hits || []).map(offToFood).filter(Boolean); if (list.length) return list; }
+  } catch (e) { /* alte Suche versuchen */ } finally { clearTimeout(to); }
+  return offSearchOld(term);
+}
+async function offSearchOld(term) {
   const url = `https://de.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(term)}&search_simple=1&action=process&json=1&page_size=30&sort_by=unique_scans_n&fields=${OFF_FIELDS}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -735,9 +765,9 @@ async function handleBarcode(code, pane) {
   try {
     const food = await offBarcode(code);
     if (food) { openAmountSheet(food); return; }
-    out.innerHTML = `<div class="empty">Produkt ${esc(code)} ist nicht in der Datenbank.</div><div class="btns"><button class="btn" id="bcphoto">Mit Foto erkennen</button><button class="btn primary" id="bcnew">Selbst eintragen</button></div>`;
+    out.innerHTML = `<div class="empty">Produkt ${esc(code)} ist nicht in der Datenbank. Such es einfach nach Namen, zum Beispiel „Reis“ oder „Hähnchenbrust“.</div><div class="btns"><button class="btn primary" id="bcsearch">Nach Namen suchen</button><button class="btn" id="bcnew">Werte von der Packung eintragen</button></div>`;
+    $('#bcsearch', pane).onclick = () => { addTab = 'search'; renderAddSheet(); };
     $('#bcnew', pane).onclick = () => openFoodForm({ barcode: code });
-    $('#bcphoto', pane).onclick = () => { pendingBarcode = code; addTab = 'photo'; renderAddSheet(); };
   } catch (e) {
     out.innerHTML = `<div class="empty">Die Datenbank ist gerade nicht erreichbar. Prüf deine Internetverbindung.</div>`;
   }
