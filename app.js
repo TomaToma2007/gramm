@@ -1360,6 +1360,11 @@ async function loadVorgaben() {
         await dbPut(st, row);
       }
     }
+    // Korrekturen von Claude: überschreiben gezielt einzelne Einträge.
+    for (const [st, rows] of Object.entries(v.set || {})) {
+      if (!allowed[st] || !Array.isArray(rows)) continue;
+      for (const row of rows) { if (row && row[allowed[st]]) await dbPut(st, row); }
+    }
     await setSetting('vorgabenVersion', v.version);
     toast(v.message || 'Von Claude aktualisiert.', 3500);
     scheduleSync();
