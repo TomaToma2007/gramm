@@ -15,6 +15,7 @@ const toDateStr = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2
 const parseDate = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
 const addDays = (s, n) => { const d = parseDate(s); d.setDate(d.getDate() + n); return toDateStr(d); };
 const todayStr = () => toDateStr(new Date());
+const nowTime = () => { const d = new Date(); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
 const MONTHS = ['Jan', 'Feb', 'März', 'Apr', 'Mai', 'Juni', 'Juli', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
 const DAYS = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
 const shortDate = s => { const d = parseDate(s); return `${d.getDate()}. ${MONTHS[d.getMonth()]}`; };
@@ -799,7 +800,10 @@ async function openWeightSheet(date) {
   const all = await dbAll('weights');
   const last = all.sort((a, b) => b.date.localeCompare(a.date))[0];
   const body = openSheet('Gewicht eintragen', `
-    <label class="f">Datum<input type="date" id="wd" value="${date}"></label>
+    <div class="grid2">
+      <label class="f">Datum<input type="date" id="wd" value="${date}"></label>
+      <label class="f">Uhrzeit<input type="time" id="wt" value="${cur && cur.time ? cur.time : nowTime()}"></label>
+    </div>
     <label class="f">Gewicht in kg<input type="number" inputmode="decimal" step="0.1" id="wk" value="${cur ? cur.kg : (last ? last.kg : '')}"></label>
     <div class="muted small">Am besten morgens nach der Toilette und vor dem Frühstück.</div>
     <button class="btn primary block" id="wsave">Speichern</button>`);
@@ -809,7 +813,9 @@ async function openWeightSheet(date) {
     const d = $('#wd', body).value;
     if (!(kg > 20 && kg < 400)) { toast('Bitte gib ein gültiges Gewicht ein.'); return; }
     if (!d) { toast('Bitte wähl ein Datum.'); return; }
-    await dbPut('weights', { date: d, kg: r1(kg) });
+    const time = $('#wt', body).value || '';
+    if (d !== date && cur) await dbDel('weights', date);
+    await dbPut('weights', { date: d, kg: r1(kg), time });
     closeSheet(); toast('Gewicht gespeichert.'); render();
   };
 }
@@ -903,7 +909,7 @@ async function renderWeight() {
     </section>
     <section class="card">
       <h3>Alle Einträge</h3>
-      ${weights.length ? `<table class="t"><tbody>${weights.slice().reverse().slice(0, 60).map(w => `<tr><td>${niceDate(w.date)}</td><td class="r">${fmt1(w.kg)} kg</td><td class="r"><button class="linkbtn" data-editw="${w.date}">Ändern</button> · <button class="linkbtn" data-delw="${w.date}">Löschen</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">Noch keine Einträge.</div>'}
+      ${weights.length ? `<table class="t"><tbody>${weights.slice().reverse().slice(0, 60).map(w => `<tr><td>${niceDate(w.date)}${w.time ? `<span class="muted small"> · ${esc(w.time)} Uhr</span>` : ''}</td><td class="r">${fmt1(w.kg)} kg</td><td class="r"><button class="linkbtn" data-editw="${w.date}">Ändern</button> · <button class="linkbtn" data-delw="${w.date}">Löschen</button></td></tr>`).join('')}</tbody></table>` : '<div class="empty">Noch keine Einträge.</div>'}
     </section>`;
   $('#addweight').onclick = () => openWeightSheet(t);
   $('#addwaist').onclick = openWaistSheet;
@@ -1326,7 +1332,7 @@ async function buildReport() {
   L.push(`Supplements laut Liste: ${S.supps.length ? S.supps.map(x => x.name + (x.dose ? ' ' + x.dose : '')).join(', ') : 'keine eingetragen'}`);
   L.push('', '## Gewicht, letzte 28 Tage');
   const wRecent = weights.filter(w => w.date >= addDays(t, -27));
-  L.push(wRecent.length ? wRecent.map(w => `- ${w.date}: ${w.kg} kg`).join('\n') : '- keine Werte');
+  L.push(wRecent.length ? wRecent.map(w => `- ${w.date}${w.time ? ' um ' + w.time + ' Uhr' : ''}: ${w.kg} kg`).join('\n') : '- keine Werte');
   const weeks = weeklyAverages(weights).slice(-6);
   if (weeks.length) { L.push('', 'Wochenschnitte (Woche ab Montag):'); weeks.forEach(w => L.push(`- ${w.week}: ${r1(w.avg)} kg aus ${w.n} Werten`)); }
   L.push('', '## Ernährung, letzte 14 Tage');
