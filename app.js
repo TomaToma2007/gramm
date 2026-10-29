@@ -606,15 +606,31 @@ async function offBarcode(code) {
 }
 
 // ---------- Barcode-Scanner ----------
-let scanStream = null, scanTimer = null, html5Scanner = null;
+// iPhones haben keine eingebaute Barcode-Erkennung. Dann laden wir eine Ersatz-Erkennung nach.
+const SCAN_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'];
+const POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/barcode-detector@2.2.11/dist/iife/pure.js';
+let detectorPromise = null, scanStream = null, scanTimer = null;
+function getDetector() {
+  if (!detectorPromise) detectorPromise = (async () => {
+    if ('BarcodeDetector' in window) {
+      try {
+        const have = await window.BarcodeDetector.getSupportedFormats();
+        const want = SCAN_FORMATS.filter(f => have.includes(f));
+        if (want.includes('ean_13')) return new window.BarcodeDetector({ formats: want });
+      } catch (e) { /* Ersatz nehmen */ }
+    }
+    await loadScript(POLYFILL_URL);
+    return new window.BarcodeDetectionAPI.BarcodeDetector({ formats: SCAN_FORMATS });
+  })().catch(e => { detectorPromise = null; throw e; });
+  return detectorPromise;
+}
 function stopScanner() {
-  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
   if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
-  if (html5Scanner) { const s = html5Scanner; html5Scanner = null; s.stop().catch(() => {}).finally(() => { try { s.clear(); } catch (e) { /* egal */ } }); }
 }
 function loadScript(src) {
   return new Promise((resolve, reject) => {
-    if ($(`script[src="${src}"]`)) { resolve(); return; }
+    if (document.querySelector(`script[src="${src}"]`) && window.BarcodeDetectionAPI) { resolve(); return; }
     const s = document.createElement('script');
     s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('Laden fehlgeschlagen'));
     document.head.appendChild(s);
@@ -623,54 +639,91 @@ function loadScript(src) {
 function renderScanPane(pane) {
   pane.innerHTML = `
     <div id="scanarea"><button class="btn primary block" id="startscan">Kamera starten</button></div>
-    <div class="muted small">Halte den Barcode ruhig in den Rahmen. Die Kamera funktioniert nur über HTTPS.</div>
+    <label class="btn block" style="text-align:center">Foto vom Barcode machen<input type="file" accept="image/*" capture="environment" id="barcodephoto" class="hidden"></label>
+    <div class="muted small">Halte den Barcode gerade und nah, etwa 10 bis 15 cm. Klappt die Kamera nicht, nimm den Foto-Knopf.</div>
     <div class="row"><input type="text" inputmode="numeric" id="manualcode" placeholder="Barcode eintippen"><button class="btn" id="lookup">Suchen</button></div>
     <div id="scanresult"></div>`;
+  getDetector().catch(() => {});
   $('#startscan', pane).onclick = () => startScanner(pane);
+  $('#barcodephoto', pane).onchange = e => scanPhoto(e.target.files[0], pane);
   const go = () => { const c = $('#manualcode', pane).value.replace(/\D/g, ''); if (c.length >= 6) handleBarcode(c, pane); else toast('Der Barcode ist zu kurz.'); };
   $('#lookup', pane).onclick = go;
   $('#manualcode', pane).onkeydown = e => { if (e.key === 'Enter') go(); };
 }
+function onBarcodeFound(code, pane) {
+  stopScanner();
+  if (navigator.vibrate) navigator.vibrate(60);
+  const area = $('#scanarea', pane);
+  if (area) { area.innerHTML = `<button class="btn block" id="startscan">Nochmal scannen</button>`; $('#startscan', pane).onclick = () => startScanner(pane); }
+  handleBarcode(code, pane);
+}
 async function startScanner(pane) {
   const area = $('#scanarea', pane);
-  const onCode = code => { stopScanner(); if (navigator.vibrate) navigator.vibrate(60); area.innerHTML = `<button class="btn block" id="startscan">Nochmal scannen</button>`; $('#startscan', pane).onclick = () => startScanner(pane); handleBarcode(code, pane); };
-  if (!window.isSecureContext) { toast('Die Kamera braucht HTTPS. Stell die App online, siehe Ziele → Hilfe.'); return; }
-  if ('BarcodeDetector' in window) {
-    try {
-      const formats = await BarcodeDetector.getSupportedFormats();
-      const want = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'].filter(f => formats.includes(f));
-      if (want.length) {
-        const detector = new BarcodeDetector({ formats: want });
-        area.innerHTML = `<div class="scanbox"><video id="scanvideo" playsinline muted></video><div class="aim"></div></div><button class="btn block" id="stopscan" style="margin-top:8px">Abbrechen</button>`;
-        $('#stopscan', pane).onclick = () => { stopScanner(); renderScanPane(pane); };
-        scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
-        const video = $('#scanvideo', pane);
-        video.srcObject = scanStream;
-        await video.play();
-        let busy = false;
-        scanTimer = setInterval(async () => {
-          if (busy || !scanStream) return;
-          busy = true;
-          try { const codes = await detector.detect(video); if (codes.length) onCode(codes[0].rawValue); } catch (e) { /* weiter versuchen */ }
-          busy = false;
-        }, 250);
-        return;
-      }
-    } catch (e) {
-      if (e && e.name === 'NotAllowedError') { toast('Kamera-Zugriff wurde abgelehnt.'); renderScanPane(pane); return; }
-    }
-  }
-  // Ersatz für iPhone und ältere Browser
-  area.innerHTML = `<div id="scan-reader"></div><div class="muted small" id="scanload"><span class="spinner"></span> Scanner wird geladen …</div>`;
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) { toast('Die Kamera geht hier nicht. Nimm den Foto-Knopf.', 4000); return; }
+  area.innerHTML = `<div class="scanbox"><video id="scanvideo" playsinline muted autoplay></video><div class="aim"></div></div><div class="muted small" id="scanhint" style="margin-top:6px"><span class="spinner"></span> Kamera startet …</div><button class="btn block" id="stopscan" style="margin-top:8px">Abbrechen</button>`;
+  $('#stopscan', pane).onclick = () => { stopScanner(); renderScanPane(pane); };
+  let detector;
   try {
-    await loadScript('https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js');
-    $('#scanload', pane)?.remove();
-    const F = window.Html5QrcodeSupportedFormats;
-    html5Scanner = new window.Html5Qrcode('scan-reader', { formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128], verbose: false });
-    await html5Scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 260, height: 120 } }, code => onCode(code), () => {});
+    [detector, scanStream] = await Promise.all([
+      getDetector(),
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }),
+    ]);
   } catch (e) {
-    area.innerHTML = `<div class="empty">Der Scanner konnte nicht starten. Tipp den Barcode unten ein.</div><button class="btn block" id="startscan">Nochmal versuchen</button>`;
+    stopScanner();
+    const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+    area.innerHTML = `<div class="empty">${denied ? 'Die Kamera ist für Gramm nicht erlaubt. Am iPhone: Einstellungen, Safari, Kamera auf „Erlauben“. Oder nimm den Foto-Knopf.' : 'Die Kamera oder die Erkennung konnte nicht starten. Nimm den Foto-Knopf.'}</div><button class="btn block" id="startscan">Nochmal versuchen</button>`;
     $('#startscan', pane).onclick = () => startScanner(pane);
+    return;
+  }
+  const video = $('#scanvideo', pane);
+  if (!video) { stopScanner(); return; }
+  video.srcObject = scanStream;
+  try { await video.play(); } catch (e) { /* iOS startet trotzdem */ }
+  const hint = $('#scanhint', pane); if (hint) hint.textContent = 'Barcode in den Rahmen halten.';
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const tick = async () => {
+    if (!scanStream) return;
+    try {
+      const w = video.videoWidth, h = video.videoHeight;
+      if (w && h) {
+        // Nur die Mitte auswerten, das ist schneller und genauer
+        const cw = Math.round(w * 0.8), ch = Math.round(h * 0.5);
+        canvas.width = cw; canvas.height = ch;
+        ctx.drawImage(video, (w - cw) / 2, (h - ch) / 2, cw, ch, 0, 0, cw, ch);
+        const codes = await detector.detect(canvas);
+        const hit = codes.find(c => /^\d{6,14}$/.test(c.rawValue));
+        if (hit) { onBarcodeFound(hit.rawValue, pane); return; }
+      }
+    } catch (e) { /* nächstes Bild */ }
+    scanTimer = setTimeout(tick, 150);
+  };
+  tick();
+}
+async function scanPhoto(file, pane) {
+  if (!file) return;
+  const out = $('#scanresult', pane);
+  out.innerHTML = `<span class="spinner"></span> <span class="muted small">Barcode wird gesucht …</span>`;
+  try {
+    const detector = await getDetector();
+    const url = URL.createObjectURL(file);
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const tries = [1, 0.5];
+    let code = null;
+    for (const sc of tries) {
+      const c = document.createElement('canvas');
+      const s = Math.min(1, 2000 / Math.max(img.width, img.height)) * sc;
+      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      const codes = await detector.detect(c);
+      const hit = codes.find(x => /^\d{6,14}$/.test(x.rawValue));
+      if (hit) { code = hit.rawValue; break; }
+    }
+    URL.revokeObjectURL(url);
+    if (code) { if (navigator.vibrate) navigator.vibrate(60); handleBarcode(code, pane); }
+    else out.innerHTML = '<div class="empty">Kein Barcode erkannt. Fotografier ihn gerade, scharf und bildfüllend.</div>';
+  } catch (e) {
+    out.innerHTML = '<div class="empty">Die Erkennung konnte nicht laden. Prüf dein Internet oder tipp den Barcode ein.</div>';
   }
 }
 async function handleBarcode(code, pane) {
