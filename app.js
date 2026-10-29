@@ -44,6 +44,13 @@ function defaultMeal() {
   return 'snack';
 }
 
+// Supplements: Ohne Eintrag für einen Tag gelten alle täglichen als genommen.
+function takenFor(rec) { return new Set(rec ? rec.taken : S.supps.filter(x => x.daily !== false).map(x => x.id)); }
+const SUPP_NUTRIENTS = [
+  ['vitD_ug', 'Vitamin D', 'µg'], ['vitK2_ug', 'Vitamin K2', 'µg'], ['vitC_mg', 'Vitamin C', 'mg'], ['zinc_mg', 'Zink', 'mg'],
+  ['epa_mg', 'EPA', 'mg'], ['dha_mg', 'DHA', 'mg'], ['vitE_mg', 'Vitamin E', 'mg'], ['creatine_g', 'Kreatin', 'g'],
+];
+
 // ---------- Datenbank ----------
 const DB_NAME = 'gramm';
 const DB_VER = 2;
@@ -103,7 +110,7 @@ const DEFAULTS = {
   goalKcal: 2900, goalP: 180, goalF: 80, goalC: 365,
   waterGoal: 3000, glassSize: 250,
   apiKey: '', model: 'claude-sonnet-5-5',
-  ghToken: '', ghRepo: '', autoSync: true, lastSync: 0, dirty: 0,
+  ghToken: '', ghRepo: '', autoSync: true, lastSync: 0, dirty: 0, vorgabenVersion: 0,
   supps: [],
   seeded: false,
 };
@@ -205,7 +212,7 @@ function nutriHtml(v) {
 async function renderDiary() {
   const date = state.date;
   const [entries, waterRec, weightRec, suppRec] = await Promise.all([entriesOn(date), dbGet('water', date), dbGet('weights', date), dbGet('suppLog', date)]);
-  const taken = new Set(suppRec ? suppRec.taken : []);
+  const taken = takenFor(suppRec);
   const g = goalsFor(date);
   const tot = sumEntries(entries);
   const left = g.kcal - tot.kcal;
@@ -1066,7 +1073,7 @@ async function renderSettings() {
     </section>
     <section class="card">
       <h3>Supplements</h3>
-      <p class="muted small" style="margin:0 0 8px">Diese Liste erscheint im Tagebuch zum Abhaken.</p>
+      <p class="muted small" style="margin:0 0 8px">Alle Supplements gelten jeden Tag als genommen. Tipp im Tagebuch eins an, wenn du es ausgelassen hast. Claude kann diese Liste auch selbst aktualisieren.</p>
       <div class="list">${S.supps.length ? S.supps.map(x => `<div class="item" style="cursor:default"><div style="min-width:0"><div class="t">${esc(x.name)}</div><div class="s">${esc(x.dose || '')}</div></div><button class="linkbtn" data-delsupp="${x.id}">Löschen</button></div>`).join('') : '<div class="empty">Noch keine Supplements.</div>'}</div>
       <div class="grid2" style="margin-top:8px"><input type="text" id="suppname" placeholder="Name, z. B. Kreatin"><input type="text" id="suppdose" placeholder="Menge, z. B. 5 g"></div>
       <button class="btn block" id="addsupp" style="margin-top:8px">Hinzufügen</button>
@@ -1130,7 +1137,7 @@ async function renderSettings() {
   $('#addsupp').onclick = async () => {
     const name = $('#suppname').value.trim();
     if (!name) { toast('Bitte gib einen Namen ein.'); return; }
-    await setSetting('supps', [...S.supps, { id: uid(), name, dose: $('#suppdose').value.trim() }]);
+    await setSetting('supps', [...S.supps, { id: uid(), name, dose: $('#suppdose').value.trim(), daily: true }]);
     scheduleSync(); renderSettings();
   };
   $$('[data-delsupp]').forEach(b => b.onclick = async () => { await setSetting('supps', S.supps.filter(x => x.id !== b.dataset.delsupp)); scheduleSync(); renderSettings(); });
@@ -1334,6 +1341,22 @@ async function restoreFromGitHub() {
   confirmImport(json);
 }
 
+// Vorgaben, die Claude in den Speicher legt, zum Beispiel die Supplement-Liste
+async function loadVorgaben() {
+  if (!syncReady()) return;
+  try {
+    const res = await gh('vorgaben.json', {}, 'application/vnd.github.raw+json');
+    if (!res.ok) return;
+    const v = await res.json();
+    if (!v || !(v.version > (S.vorgabenVersion || 0))) return;
+    if (Array.isArray(v.supplements)) await setSetting('supps', v.supplements);
+    await setSetting('vorgabenVersion', v.version);
+    toast(v.message || 'Von Claude aktualisiert.', 3500);
+    scheduleSync();
+    if (!sheetOpen()) render();
+  } catch (e) { /* ohne Netz einfach später */ }
+}
+
 // Lesbarer Bericht für Claude
 async function buildReport() {
   const t = todayStr();
@@ -1341,7 +1364,7 @@ async function buildReport() {
   const [entries, weights, water, supps, foods] = await Promise.all([entriesBetween(from, t), dbAll('weights'), dbAll('water'), dbAll('suppLog'), dbAll('foods')]);
   weights.sort((a, b) => a.date.localeCompare(b.date));
   const waterMap = new Map(water.map(w => [w.date, w.ml]));
-  const suppMap = new Map(supps.map(s => [s.date, new Set(s.taken)]));
+  const suppMap = new Map(supps.map(s => [s.date, s]));
   const ph = phaseFor(t);
   const L = [];
   L.push('# Gramm-Bericht', '', `Stand: ${new Date().toLocaleString('de-DE')}`);
@@ -1358,15 +1381,21 @@ async function buildReport() {
     const list = entries.filter(e => e.date === d);
     const s = sumEntries(list);
     const g = goalsFor(d);
-    const sp = suppMap.get(d);
+    const sp = takenFor(suppMap.get(d));
     L.push('', `### ${d} (${niceDate(d)}), Ziel ${g.kcal} kcal`);
-    if (!list.length) { L.push('Keine Einträge.'); continue; }
+    if (S.supps.length) {
+      L.push(`- Supplements: ${S.supps.map(x => (sp.has(x.id) ? '✓ ' : '✗ ') + x.name).join(', ')}`);
+      const tot = {};
+      S.supps.filter(x => sp.has(x.id) && x.nutrients).forEach(x => Object.entries(x.nutrients).forEach(([k, v]) => { tot[k] = (tot[k] || 0) + Number(v); }));
+      const parts = SUPP_NUTRIENTS.filter(([k]) => tot[k]).map(([k, n, u]) => `${n} ${r1(tot[k])} ${u}`);
+      if (parts.length) L.push(`- Aus Supplements: ${parts.join(' · ')}`);
+    }
+    if (!list.length) { L.push('Keine Essens-Einträge.'); continue; }
     L.push(`Summe: ${r0(s.kcal)} kcal · Eiweiß ${r0(s.p)} g · Fett ${r0(s.f)} g · KH ${r0(s.c)} g · Ballaststoffe ${r0(s.fib)} g · Zucker ${r0(s.sug)} g · Salz ${r1(s.salt)} g · Wasser ${r1((waterMap.get(d) || 0) / 1000)} l`);
     MEALS.forEach(m => {
       const ml = list.filter(e => e.meal === m.id);
       if (ml.length) L.push(`- ${m.name}: ` + ml.map(e => `${e.name}${e.grams ? ' ' + r0(e.grams) + ' g' : ''} (${r0(e.kcal)} kcal)`).join('; '));
     });
-    if (S.supps.length) L.push(`- Supplements: ${S.supps.map(x => (sp && sp.has(x.id) ? '✓ ' : '✗ ') + x.name).join(', ')}`);
   }
   const favs = foods.filter(f => f.fav).map(f => f.name);
   if (favs.length) L.push('', `Favoriten: ${favs.join(', ')}`);
@@ -1401,6 +1430,8 @@ async function init() {
   window.addEventListener('online', () => { if (needsSync()) syncNow(true); });
   setSyncBadge(syncReady() && (S.dirty || 0) > (S.lastSync || 0) ? 'pending' : 'ok');
   if (needsSync()) setTimeout(() => syncNow(true), 800);
+  setTimeout(loadVorgaben, 300);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') loadVorgaben(); });
   $('#syncbadge').onclick = () => syncNow(false);
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   render();
