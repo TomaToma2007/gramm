@@ -1350,6 +1350,16 @@ async function loadVorgaben() {
     const v = await res.json();
     if (!v || !(v.version > (S.vorgabenVersion || 0))) return;
     if (Array.isArray(v.supplements)) await setSetting('supps', v.supplements);
+    // Einträge, die Claude hinzufügt. Nur neu anlegen, nie vorhandene überschreiben.
+    const allowed = { entries: 'id', foods: 'id', suppLog: 'date', weights: 'date', water: 'date' };
+    for (const [st, rows] of Object.entries(v.add || {})) {
+      if (!allowed[st] || !Array.isArray(rows)) continue;
+      for (const row of rows) {
+        const key = row && row[allowed[st]];
+        if (!key || await dbGet(st, key)) continue;
+        await dbPut(st, row);
+      }
+    }
     await setSetting('vorgabenVersion', v.version);
     toast(v.message || 'Von Claude aktualisiert.', 3500);
     scheduleSync();
