@@ -103,7 +103,7 @@ const DEFAULTS = {
   goalKcal: 2900, goalP: 180, goalF: 80, goalC: 365,
   waterGoal: 3000, glassSize: 250,
   apiKey: '', model: 'claude-sonnet-5-5',
-  ghToken: '', ghRepo: '', autoSync: true, lastSync: 0,
+  ghToken: '', ghRepo: '', autoSync: true, lastSync: 0, dirty: 0,
   supps: [],
   seeded: false,
 };
@@ -1098,7 +1098,7 @@ async function renderSettings() {
       <p><b>Zum Startbildschirm:</b> Am iPhone in Safari auf Teilen und dann „Zum Home-Bildschirm“. Am Android-Handy in Chrome im Menü auf „App installieren“.</p>
       <p><b>Barcode:</b> Die Kamera funktioniert nur, wenn die App über HTTPS läuft, zum Beispiel auf GitHub Pages.</p>
       <p><b>Wiegen:</b> Jeden Morgen nach der Toilette. Entscheidend ist der Wochenschnitt.</p>
-      <p><b>Sync:</b> Nach jeder Änderung speichert die App nach wenigen Sekunden automatisch. Öffne die App kurz, wenn du Claude um eine Auswertung bittest.</p>
+      <p><b>Sync:</b> Nach jeder Änderung sendet die App automatisch. Oben rechts siehst du „✓ Gesendet“. Steht dort „Wartet“, wird es beim nächsten Öffnen nachgeholt.</p>
     </section>
     <section class="card">
       <h3>Alles löschen</h3>
@@ -1140,7 +1140,7 @@ async function renderSettings() {
     await setSetting('autoSync', $('#autosync').checked);
   };
   $('#savegh').onclick = async () => { await saveGh(); toast('Sync-Einstellungen gespeichert.'); };
-  $('#syncnow').onclick = async () => { await saveGh(); await syncNow(false); const st = $('#syncstatus'); if (st) st.textContent = syncStatusText(); };
+  $('#syncnow').onclick = async () => { await saveGh(); setSyncBadge('pending'); await syncNow(false); const st = $('#syncstatus'); if (st) st.textContent = syncStatusText(); };
   $('#ghrestore').onclick = async () => { await saveGh(); restoreFromGitHub(); };
   $('#import').onchange = e => importData(e.target.files[0]);
   $('#wipe').onclick = () => {
@@ -1240,8 +1240,21 @@ function syncReady() { return !!(S.ghToken && /^[\w.-]+\/[\w.-]+$/.test(S.ghRepo
 function scheduleSync() {
   if (!S.autoSync || !syncReady()) return;
   syncPending = true;
+  // Merken, dass etwas offen ist. So wird es beim nächsten Start nachgeholt, falls das Handy die App vorher stoppt.
+  S.dirty = Date.now();
+  dbPut('settings', { key: 'dirty', value: S.dirty }).catch(() => {});
+  setSyncBadge('pending');
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => syncNow(true), 4000);
+  syncTimer = setTimeout(() => syncNow(true), 1200);
+}
+function needsSync() { return syncReady() && S.autoSync && ((S.dirty || 0) > (S.lastSync || 0) || Date.now() - (S.lastSync || 0) > 3 * 3600 * 1000); }
+function setSyncBadge(state) {
+  const el = document.getElementById('syncbadge');
+  if (!el) return;
+  if (!syncReady()) { el.hidden = true; return; }
+  el.hidden = false;
+  el.dataset.state = state;
+  el.textContent = state === 'ok' ? '✓ Gesendet' : state === 'busy' ? 'Sendet …' : state === 'error' ? 'Nicht gesendet' : 'Wartet …';
 }
 function syncStatusText() {
   if (!syncReady()) return 'Noch nicht eingerichtet.';
@@ -1289,17 +1302,21 @@ async function syncNow(silent) {
   if (!syncReady()) { if (!silent) toast('Trag zuerst Speicher und Token ein.'); return false; }
   if (syncing) { syncPending = true; return false; }
   syncing = true; syncPending = false; clearTimeout(syncTimer);
+  const started = Date.now();
+  setSyncBadge('busy');
   try {
     const data = await exportObject();
     const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
     await ghPut('gramm-daten.json', JSON.stringify(data, null, 1), `Daten ${stamp}`);
     await ghPut('bericht.md', await buildReport(), `Bericht ${stamp}`);
-    await setSetting('lastSync', Date.now());
+    await setSetting('lastSync', started);
+    setSyncBadge((S.dirty || 0) > started ? 'pending' : 'ok');
     if (!silent) toast('Mit GitHub synchronisiert.');
     return true;
   } catch (e) {
     const msg = e instanceof TypeError ? 'Keine Verbindung zu GitHub. Prüf dein Internet.' : e.message;
     if (!silent) toast(msg, 4000); else console.warn('Sync:', msg);
+    setSyncBadge('error');
     return false;
   } finally {
     syncing = false;
@@ -1377,8 +1394,14 @@ async function init() {
       if (!sheetOpen()) render();
     }
   });
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && syncPending) syncNow(true); });
-  if (S.autoSync && syncReady() && Date.now() - (S.lastSync || 0) > 3 * 3600 * 1000) setTimeout(() => syncNow(true), 3000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && syncPending) syncNow(true);
+    if (document.visibilityState === 'visible' && needsSync()) syncNow(true);
+  });
+  window.addEventListener('online', () => { if (needsSync()) syncNow(true); });
+  setSyncBadge(syncReady() && (S.dirty || 0) > (S.lastSync || 0) ? 'pending' : 'ok');
+  if (needsSync()) setTimeout(() => syncNow(true), 800);
+  $('#syncbadge').onclick = () => syncNow(false);
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   render();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
