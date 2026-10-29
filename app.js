@@ -1247,7 +1247,7 @@ function scheduleSync() {
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => syncNow(true), 1200);
 }
-function needsSync() { return syncReady() && S.autoSync && ((S.dirty || 0) > (S.lastSync || 0) || Date.now() - (S.lastSync || 0) > 3 * 3600 * 1000); }
+function needsSync() { return syncReady() && S.autoSync && (!S.dirty || (S.dirty || 0) > (S.lastSync || 0) || Date.now() - (S.lastSync || 0) > 3 * 3600 * 1000); }
 function setSyncBadge(state) {
   const el = document.getElementById('syncbadge');
   if (!el) return;
