@@ -1092,7 +1092,7 @@ async function renderSettings() {
       <p><b>Zum Startbildschirm:</b> Am iPhone in Safari auf Teilen und dann „Zum Home-Bildschirm“. Am Android-Handy in Chrome im Menü auf „App installieren“.</p>
       <p><b>Barcode:</b> Die Kamera funktioniert nur, wenn die App über HTTPS läuft, zum Beispiel auf GitHub Pages.</p>
       <p><b>Wiegen:</b> Jeden Morgen nach der Toilette. Entscheidend ist der Wochenschnitt.</p>
-      <p><b>Sync:</b> Nach jeder Änderung speichert die App nach etwa 20 Sekunden automatisch. Öffne die App kurz, wenn du Claude um eine Auswertung bittest.</p>
+      <p><b>Sync:</b> Nach jeder Änderung speichert die App nach wenigen Sekunden automatisch. Öffne die App kurz, wenn du Claude um eine Auswertung bittest.</p>
     </section>
     <section class="card">
       <h3>Alles löschen</h3>
@@ -1235,7 +1235,7 @@ function scheduleSync() {
   if (!S.autoSync || !syncReady()) return;
   syncPending = true;
   clearTimeout(syncTimer);
-  syncTimer = setTimeout(() => syncNow(true), 20000);
+  syncTimer = setTimeout(() => syncNow(true), 4000);
 }
 function syncStatusText() {
   if (!syncReady()) return 'Noch nicht eingerichtet.';
