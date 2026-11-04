@@ -110,7 +110,7 @@ const DEFAULTS = {
   goalKcal: 2900, goalP: 180, goalF: 80, goalC: 365,
   waterGoal: 3000, glassSize: 250,
   apiKey: '', model: 'claude-sonnet-5-5',
-  ghToken: '', ghRepo: '', autoSync: true, lastSync: 0, dirty: 0, vorgabenVersion: 0,
+  ghToken: '', ghRepo: '', autoSync: true, lastSync: 0, dirty: 0, vorgabenVersion: 0, unknownCodes: [],
   supps: [],
   seeded: false,
 };
@@ -670,7 +670,7 @@ function renderScanPane(pane) {
   pane.innerHTML = `
     <div id="scanarea"><button class="btn primary block" id="startscan">Kamera starten</button></div>
     <label class="btn block" style="text-align:center">Foto vom Barcode machen<input type="file" accept="image/*" capture="environment" id="barcodephoto" class="hidden"></label>
-    <div class="muted small">Halte den Barcode gerade und nah, etwa 10 bis 15 cm. Klappt die Kamera nicht, nimm den Foto-Knopf.</div>
+    <div class="muted small">Halte das Handy etwa 20 bis 30 cm weg, die App zoomt selbst. Bei zu wenig Abstand wird der Code am iPhone unscharf. Klappt es nicht, nimm den Foto-Knopf.</div>
     <div class="row"><input type="text" inputmode="numeric" id="manualcode" placeholder="Barcode eintippen"><button class="btn" id="lookup">Suchen</button></div>
     <div id="scanresult"></div>`;
   getDetector().catch(() => {});
@@ -709,7 +709,24 @@ async function startScanner(pane) {
   if (!video) { stopScanner(); return; }
   video.srcObject = scanStream;
   try { await video.play(); } catch (e) { /* iOS startet trotzdem */ }
-  const hint = $('#scanhint', pane); if (hint) hint.textContent = 'Barcode in den Rahmen halten.';
+  const hint = $('#scanhint', pane); if (hint) hint.textContent = 'Barcode in den Rahmen halten, Abstand 20 bis 30 cm.';
+  // Zoom und Dauer-Fokus, wo das Handy es kann. Dann muss man nicht so nah ran.
+  try {
+    const track = scanStream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    const adv = {};
+    if (caps.zoom) adv.zoom = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 2));
+    if (caps.focusMode && caps.focusMode.includes('continuous')) adv.focusMode = 'continuous';
+    if (Object.keys(adv).length) await track.applyConstraints({ advanced: [adv] });
+    if (caps.torch) {
+      const tb = document.createElement('button');
+      tb.className = 'btn block'; tb.style.marginTop = '8px'; tb.textContent = 'Licht an';
+      let on = false;
+      tb.onclick = async () => { on = !on; try { await track.applyConstraints({ advanced: [{ torch: on }] }); tb.textContent = on ? 'Licht aus' : 'Licht an'; } catch (e) { /* egal */ } };
+      area.appendChild(tb);
+    }
+  } catch (e) { /* ohne Zoom weiter */ }
+  let frames = 0;
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const tick = async () => {
@@ -724,6 +741,8 @@ async function startScanner(pane) {
         const codes = await detector.detect(canvas);
         const hit = codes.find(c => /^\d{6,14}$/.test(c.rawValue));
         if (hit) { onBarcodeFound(hit.rawValue, pane); return; }
+        frames++;
+        if (frames === 60 && hint) hint.textContent = 'Noch nichts erkannt. Etwas weiter weg halten oder den Foto-Knopf nehmen.';
       }
     } catch (e) { /* nächstes Bild */ }
     scanTimer = setTimeout(tick, 150);
@@ -738,13 +757,16 @@ async function scanPhoto(file, pane) {
     const detector = await getDetector();
     const url = URL.createObjectURL(file);
     const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
-    const tries = [1, 0.5];
+    // Ganzes Bild in zwei Größen, dann die Mitte vergrößert
+    const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+    const tries = [[0, 0, 1, 2000], [0, 0, 1, 1000], [0.15, 0.25, 0.7, 2000], [0.25, 0.35, 0.5, 1600]];
     let code = null;
-    for (const sc of tries) {
+    for (const [fx, fy, fw, max] of tries) {
+      const sx = W * fx, sy = H * fy, sw = W * fw, sh = H * (fy ? 1 - 2 * fy : 1);
+      const sc = Math.min(1, max / Math.max(sw, sh));
       const c = document.createElement('canvas');
-      const s = Math.min(1, 2000 / Math.max(img.width, img.height)) * sc;
-      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
-      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      c.width = Math.round(sw * sc); c.height = Math.round(sh * sc);
+      c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
       const codes = await detector.detect(c);
       const hit = codes.find(x => /^\d{6,14}$/.test(x.rawValue));
       if (hit) { code = hit.rawValue; break; }
@@ -765,7 +787,12 @@ async function handleBarcode(code, pane) {
   try {
     const food = await offBarcode(code);
     if (food) { openAmountSheet(food); return; }
-    out.innerHTML = `<div class="empty">Produkt ${esc(code)} ist nicht in der Datenbank. Such es einfach nach Namen, zum Beispiel „Reis“ oder „Hähnchenbrust“.</div><div class="btns"><button class="btn primary" id="bcsearch">Nach Namen suchen</button><button class="btn" id="bcnew">Werte von der Packung eintragen</button></div>`;
+    // Unbekannten Code merken, damit Claude das Produkt nachtragen kann
+    const unk = (S.unknownCodes || []).filter(u => u.code !== code);
+    unk.unshift({ code, date: todayStr() });
+    await setSetting('unknownCodes', unk.slice(0, 30));
+    scheduleSync();
+    out.innerHTML = `<div class="empty">Code ${esc(code)} wurde erkannt, aber das Produkt fehlt in der Datenbank. Claude sieht den Code und kann es nachtragen. Danach klappt der Scan. Für jetzt such es nach Namen.</div><div class="btns"><button class="btn primary" id="bcsearch">Nach Namen suchen</button><button class="btn" id="bcnew">Werte von der Packung eintragen</button></div>`;
     $('#bcsearch', pane).onclick = () => { addTab = 'search'; renderAddSheet(); };
     $('#bcnew', pane).onclick = () => openFoodForm({ barcode: code });
   } catch (e) {
@@ -1495,6 +1522,8 @@ async function buildReport() {
       if (ml.length) L.push(`- ${m.name}: ` + ml.map(e => `${e.name}${e.grams ? ' ' + r0(e.grams) + ' g' : ''} (${r0(e.kcal)} kcal)`).join('; '));
     });
   }
+  const unk = (S.unknownCodes || []).filter(u => !foods.some(f => f.barcode === u.code));
+  if (unk.length) L.push('', '## Unbekannte Barcodes', 'Gescannt, aber nicht in der Datenbank. Claude: Produkt recherchieren und mit Barcode in vorgaben.json unter add.foods anlegen.', ...unk.map(u => `- ${u.code} (gescannt am ${u.date})`));
   const favs = foods.filter(f => f.fav).map(f => f.name);
   if (favs.length) L.push('', `Favoriten: ${favs.join(', ')}`);
   return L.join('\n') + '\n';
