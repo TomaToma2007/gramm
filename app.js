@@ -670,7 +670,7 @@ function renderScanPane(pane) {
   pane.innerHTML = `
     <div id="scanarea"><button class="btn primary block" id="startscan">Kamera starten</button></div>
     <label class="btn block" style="text-align:center">Foto vom Barcode machen<input type="file" accept="image/*" capture="environment" id="barcodephoto" class="hidden"></label>
-    <div class="muted small">Halte das Handy etwa 20 bis 30 cm weg, die App zoomt selbst. Bei zu wenig Abstand wird der Code am iPhone unscharf. Klappt es nicht, nimm den Foto-Knopf.</div>
+    <div class="muted small">Halte das Handy etwa 15 bis 25 cm weg, bis der Code scharf ist. Klappt es nicht, nimm den Foto-Knopf.</div>
     <div class="row"><input type="text" inputmode="numeric" id="manualcode" placeholder="Barcode eintippen"><button class="btn" id="lookup">Suchen</button></div>
     <div id="scanresult"></div>`;
   getDetector().catch(() => {});
@@ -709,15 +709,12 @@ async function startScanner(pane) {
   if (!video) { stopScanner(); return; }
   video.srcObject = scanStream;
   try { await video.play(); } catch (e) { /* iOS startet trotzdem */ }
-  const hint = $('#scanhint', pane); if (hint) hint.textContent = 'Barcode in den Rahmen halten, Abstand 20 bis 30 cm.';
-  // Zoom und Dauer-Fokus, wo das Handy es kann. Dann muss man nicht so nah ran.
+  const hint = $('#scanhint', pane); if (hint) hint.textContent = 'Barcode in den Rahmen halten, bis er scharf ist.';
+  // Kein applyConstraints beim Start: das friert am iPhone das Kamerabild ein.
+  // Licht nur auf Knopfdruck.
   try {
     const track = scanStream.getVideoTracks()[0];
     const caps = track.getCapabilities ? track.getCapabilities() : {};
-    const adv = {};
-    if (caps.zoom) adv.zoom = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 2));
-    if (caps.focusMode && caps.focusMode.includes('continuous')) adv.focusMode = 'continuous';
-    if (Object.keys(adv).length) await track.applyConstraints({ advanced: [adv] });
     if (caps.torch) {
       const tb = document.createElement('button');
       tb.className = 'btn block'; tb.style.marginTop = '8px'; tb.textContent = 'Licht an';
@@ -725,7 +722,7 @@ async function startScanner(pane) {
       tb.onclick = async () => { on = !on; try { await track.applyConstraints({ advanced: [{ torch: on }] }); tb.textContent = on ? 'Licht aus' : 'Licht an'; } catch (e) { /* egal */ } };
       area.appendChild(tb);
     }
-  } catch (e) { /* ohne Zoom weiter */ }
+  } catch (e) { /* egal */ }
   let frames = 0;
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -735,17 +732,18 @@ async function startScanner(pane) {
       const w = video.videoWidth, h = video.videoHeight;
       if (w && h) {
         // Nur die Mitte auswerten, das ist schneller und genauer
-        const cw = Math.round(w * 0.8), ch = Math.round(h * 0.5);
+        const big = frames % 2 === 0;
+        const cw = Math.round(w * (big ? 0.8 : 0.5)), ch = Math.round(h * (big ? 0.5 : 0.3));
         canvas.width = cw; canvas.height = ch;
         ctx.drawImage(video, (w - cw) / 2, (h - ch) / 2, cw, ch, 0, 0, cw, ch);
         const codes = await detector.detect(canvas);
         const hit = codes.find(c => /^\d{6,14}$/.test(c.rawValue));
         if (hit) { onBarcodeFound(hit.rawValue, pane); return; }
-        frames++;
         if (frames === 60 && hint) hint.textContent = 'Noch nichts erkannt. Etwas weiter weg halten oder den Foto-Knopf nehmen.';
       }
     } catch (e) { /* nächstes Bild */ }
-    scanTimer = setTimeout(tick, 150);
+    frames++;
+    scanTimer = setTimeout(tick, 120);
   };
   tick();
 }
