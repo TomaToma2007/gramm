@@ -1468,6 +1468,11 @@ async function loadVorgaben() {
         await dbPut(st, row);
       }
     }
+    // Löschungen von Claude, zum Beispiel falsch eingetragene Einträge
+    for (const [st, keys] of Object.entries(v.del || {})) {
+      if (!allowed[st] || !Array.isArray(keys)) continue;
+      for (const k of keys) await dbDel(st, k);
+    }
     // Korrekturen von Claude: überschreiben gezielt einzelne Einträge.
     for (const [st, rows] of Object.entries(v.set || {})) {
       if (!allowed[st] || !Array.isArray(rows)) continue;
