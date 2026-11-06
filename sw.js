@@ -1,5 +1,5 @@
 // Speichert die App-Dateien, damit Gramm auch offline startet.
-const CACHE = 'gramm-v12';
+const CACHE = 'gramm-v13';
 const FILES = ['./', 'index.html', 'app.js', 'styles.css', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'foods-de.js'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

@@ -1459,7 +1459,7 @@ async function loadVorgaben() {
     if (!v || !(v.version > (S.vorgabenVersion || 0))) return;
     if (Array.isArray(v.supplements)) await setSetting('supps', v.supplements);
     // Einträge, die Claude hinzufügt. Nur neu anlegen, nie vorhandene überschreiben.
-    const allowed = { entries: 'id', foods: 'id', suppLog: 'date', weights: 'date', water: 'date' };
+    const allowed = { entries: 'id', foods: 'id', suppLog: 'date', weights: 'date', water: 'date', phases: 'id' };
     for (const [st, rows] of Object.entries(v.add || {})) {
       if (!allowed[st] || !Array.isArray(rows)) continue;
       for (const row of rows) {
@@ -1476,6 +1476,7 @@ async function loadVorgaben() {
     await setSetting('vorgabenVersion', v.version);
     toast(v.message || 'Von Claude aktualisiert.', 3500);
     scheduleSync();
+    await loadPhases();
     if (!sheetOpen()) render();
   } catch (e) { /* ohne Netz einfach später */ }
 }
