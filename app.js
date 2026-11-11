@@ -110,7 +110,7 @@ const DEFAULTS = {
   goalKcal: 2900, goalP: 180, goalF: 80, goalC: 365,
   waterGoal: 3000, glassSize: 250,
   apiKey: '', model: 'claude-sonnet-5-5',
-  ghToken: '', ghRepo: '', autoSync: true, lastSync: 0, dirty: 0, vorgabenVersion: 0, unknownCodes: [],
+  ghToken: '', ghRepo: '', autoSync: true, lastSync: 0, dirty: 0, vorgabenVersion: 0, unknownCodes: [], scanLog: [],
   supps: [],
   seeded: false,
 };
@@ -640,19 +640,44 @@ async function offBarcode(code) {
 const SCAN_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'];
 const POLYFILL_URL = 'https://cdn.jsdelivr.net/npm/barcode-detector@2.2.11/dist/iife/pure.js';
 let detectorPromise = null, scanStream = null, scanTimer = null;
-function getDetector() {
-  if (!detectorPromise) detectorPromise = (async () => {
-    if ('BarcodeDetector' in window) {
-      try {
+// Zweite Erkennung aus dem Netz, nur als Ergänzung. Die eigene Erkennung in ean.js läuft immer.
+let extraDetector = null, extraLoading = null;
+function loadExtraDetector() {
+  if (extraDetector || extraLoading) return extraLoading;
+  extraLoading = (async () => {
+    try {
+      if ('BarcodeDetector' in window) {
         const have = await window.BarcodeDetector.getSupportedFormats();
         const want = SCAN_FORMATS.filter(f => have.includes(f));
-        if (want.includes('ean_13')) return new window.BarcodeDetector({ formats: want });
-      } catch (e) { /* Ersatz nehmen */ }
-    }
-    await loadScript(POLYFILL_URL);
-    return new window.BarcodeDetectionAPI.BarcodeDetector({ formats: SCAN_FORMATS });
-  })().catch(e => { detectorPromise = null; throw e; });
-  return detectorPromise;
+        if (want.includes('ean_13')) { extraDetector = new window.BarcodeDetector({ formats: want }); return; }
+      }
+      await loadScript(POLYFILL_URL);
+      extraDetector = new window.BarcodeDetectionAPI.BarcodeDetector({ formats: SCAN_FORMATS });
+    } catch (e) { scanLog('Zweite Erkennung nicht geladen: ' + (e && e.message)); }
+  })();
+  return extraLoading;
+}
+function scanLog(msg) {
+  try {
+    const log = (S.scanLog || []).slice(0, 14);
+    log.unshift(`${todayStr()} ${nowTime()} ${msg}`);
+    setSetting('scanLog', log);
+  } catch (e) { /* egal */ }
+}
+let extraFails = 0;
+function getDetector() {
+  loadExtraDetector();
+  return Promise.resolve({
+    async detect(canvas, opts = {}) {
+      const own = GrammEAN.decodeCanvas(canvas, { lines: opts.lines || 20, need: 2, vertical: !!opts.vertical });
+      if (own) return [{ rawValue: own, format: 'ean' }];
+      if (extraDetector && extraFails < 20) {
+        try { return await extraDetector.detect(canvas); }
+        catch (e) { extraFails++; if (extraFails === 1) scanLog('Zweite Erkennung Fehler: ' + (e && e.message)); }
+      }
+      return [];
+    },
+  });
 }
 function stopScanner() {
   if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
@@ -700,6 +725,7 @@ async function startScanner(pane) {
     ]);
   } catch (e) {
     stopScanner();
+    scanLog('Kamera Fehler: ' + (e && (e.name + ' ' + e.message)));
     const denied = e && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
     area.innerHTML = `<div class="empty">${denied ? 'Die Kamera ist für Gramm nicht erlaubt. Am iPhone: Einstellungen, Safari, Kamera auf „Erlauben“. Oder nimm den Foto-Knopf.' : 'Die Kamera oder die Erkennung konnte nicht starten. Nimm den Foto-Knopf.'}</div><button class="btn block" id="startscan">Nochmal versuchen</button>`;
     $('#startscan', pane).onclick = () => startScanner(pane);
@@ -739,6 +765,7 @@ async function startScanner(pane) {
         const codes = await detector.detect(canvas);
         const hit = codes.find(c => /^\d{6,14}$/.test(c.rawValue));
         if (hit) { onBarcodeFound(hit.rawValue, pane); return; }
+        if (frames === 60) scanLog(`Live: 60 Bilder ohne Treffer, ${w}x${h}`);
         if (frames === 60 && hint) hint.textContent = 'Noch nichts erkannt. Etwas weiter weg halten oder den Foto-Knopf nehmen.';
       }
     } catch (e) { /* nächstes Bild */ }
@@ -765,13 +792,13 @@ async function scanPhoto(file, pane) {
       const c = document.createElement('canvas');
       c.width = Math.round(sw * sc); c.height = Math.round(sh * sc);
       c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
-      const codes = await detector.detect(c);
+      const codes = await detector.detect(c, { vertical: true, lines: 40 });
       const hit = codes.find(x => /^\d{6,14}$/.test(x.rawValue));
       if (hit) { code = hit.rawValue; break; }
     }
     URL.revokeObjectURL(url);
     if (code) { if (navigator.vibrate) navigator.vibrate(60); handleBarcode(code, pane); }
-    else out.innerHTML = '<div class="empty">Kein Barcode erkannt. Fotografier ihn gerade, scharf und bildfüllend.</div>';
+    else { scanLog(`Foto ohne Treffer, ${W}x${H}`); out.innerHTML = '<div class="empty">Kein Barcode erkannt. Fotografier ihn gerade, scharf und bildfüllend.</div>'; }
   } catch (e) {
     out.innerHTML = '<div class="empty">Die Erkennung konnte nicht laden. Prüf dein Internet oder tipp den Barcode ein.</div>';
   }
@@ -1526,6 +1553,7 @@ async function buildReport() {
       if (ml.length) L.push(`- ${m.name}: ` + ml.map(e => `${e.name}${e.grams ? ' ' + r0(e.grams) + ' g' : ''} (${r0(e.kcal)} kcal)`).join('; '));
     });
   }
+  if ((S.scanLog || []).length) L.push('', '## Scanner-Protokoll', ...S.scanLog.map(x => '- ' + x));
   const unk = (S.unknownCodes || []).filter(u => !foods.some(f => f.barcode === u.code));
   if (unk.length) L.push('', '## Unbekannte Barcodes', 'Gescannt, aber nicht in der Datenbank. Claude: Produkt recherchieren und mit Barcode in vorgaben.json unter add.foods anlegen.', ...unk.map(u => `- ${u.code} (gescannt am ${u.date})`));
   const favs = foods.filter(f => f.fav).map(f => f.name);
